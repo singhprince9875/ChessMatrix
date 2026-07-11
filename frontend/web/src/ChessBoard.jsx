@@ -1,0 +1,1037 @@
+import React, { useState, useEffect, useRef } from "react";
+
+// Piece Unicode character mapping
+const pieceSymbols = {
+  'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
+  'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'
+};
+
+const initialBoard = [
+  ["r", "n", "b", "q", "k", "b", "n", "r"],
+  ["p", "p", "p", "p", "p", "p", "p", "p"],
+  ["", "", "", "", "", "", "", ""],
+  ["", "", "", "", "", "", "", ""],
+  ["", "", "", "", "", "", "", ""],
+  ["", "", "", "", "", "", "", ""],
+  ["P", "P", "P", "P", "P", "P", "P", "P"],
+  ["R", "N", "B", "Q", "K", "B", "N", "R"],
+];
+
+const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
+
+export default function ChessBoard() {
+  // App Navigation state: "lobby" | "playing" | "analysis"
+  const [screenState, setScreenState] = useState("lobby");
+
+  // Game state
+  const [board, setBoard] = useState(initialBoard);
+  const [currentTurn, setCurrentTurn] = useState("White");
+  const [dragPiece, setDragPiece] = useState(null);
+  const [selectedCell, setSelectedCell] = useState(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [roomID, setRoomID] = useState("lobby");
+  const [playerSide, setPlayerSide] = useState("Both"); // "Both" | "White" | "Black" | "Spectator"
+  const [connectionStatus, setConnectionStatus] = useState("Disconnected");
+  
+  // Game metrics & history
+  const [pgnMoves, setPgnMoves] = useState([]);
+  const [capturedWhite, setCapturedWhite] = useState([]); // pieces captured from White (Black's stash)
+  const [capturedBlack, setCapturedBlack] = useState([]); // pieces captured from Black (White's stash)
+  const [whiteTime, setWhiteTime] = useState(600); // 10 minutes in seconds
+  const [blackTime, setBlackTime] = useState(600);
+  const [gameResult, setGameResult] = useState({ won: true, ELO: 15, rating: 2465, reason: "Victory", opponent: "Grandmaster_K (2510)" });
+
+  // Matchmaking lobby states
+  const [selectedTimeControl, setSelectedTimeControl] = useState("10m");
+  const [isSearching, setIsSearching] = useState(false);
+  const [showMatchOverlay, setShowMatchOverlay] = useState(false);
+  const [matchCountdown, setMatchCountdown] = useState(8);
+  const [activeTab, setActiveTab] = useState("history"); // "history" | "analysis" | "chat"
+
+  // Chat state
+  const [chatMessage, setChatMessage] = useState("");
+  const [chatList, setChatList] = useState([
+    { sender: "System", text: "Welcome to Grandmaster Elite Chat!" },
+    { sender: "Grandmaster_K", text: "Good luck, have fun!" }
+  ]);
+
+  const socketRef = useRef(null);
+  const searchTimerRef = useRef(null);
+  const countdownIntervalRef = useRef(null);
+
+  // Manage WebSockets
+  useEffect(() => {
+    connectWebSocket(roomID);
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
+    };
+  }, [roomID]);
+
+  // Game Clock Timers
+  useEffect(() => {
+    let clockInterval = null;
+    if (screenState === "playing" && connectionStatus === "Connected") {
+      clockInterval = setInterval(() => {
+        if (currentTurn === "White") {
+          setWhiteTime((prev) => (prev > 0 ? prev - 1 : 0));
+        } else {
+          setBlackTime((prev) => (prev > 0 ? prev - 1 : 0));
+        }
+      }, 1000);
+    }
+    return () => {
+      if (clockInterval) clearInterval(clockInterval);
+    };
+  }, [screenState, connectionStatus, currentTurn]);
+
+  // Auto-resign on timeout
+  useEffect(() => {
+    if (whiteTime === 0) {
+      triggerGameOver("Black", "Timeout");
+    }
+  }, [whiteTime]);
+
+  useEffect(() => {
+    if (blackTime === 0) {
+      triggerGameOver("White", "Timeout");
+    }
+  }, [blackTime]);
+
+  // Matchmaking countdown effect
+  useEffect(() => {
+    if (showMatchOverlay) {
+      setMatchCountdown(8);
+      countdownIntervalRef.current = setInterval(() => {
+        setMatchCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(countdownIntervalRef.current);
+            acceptMatch();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+    };
+  }, [showMatchOverlay]);
+
+  function connectWebSocket(room) {
+    setConnectionStatus("Connecting...");
+    setErrorMsg("");
+
+    const wsUrl = `ws://localhost:8080/ws?room=${room}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setConnectionStatus("Connected");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.status === "ok" || data.status === "connected") {
+          setBoard(data.board);
+          setCurrentTurn(data.currentTurn);
+          setErrorMsg("");
+
+          if (data.status === "ok") {
+            scanCapturedPieces(data.board);
+          }
+        } else if (data.status === "error") {
+          setErrorMsg(data.error || "Invalid move");
+          if (data.board) {
+            setBoard(data.board);
+          }
+        } else if (data.status === "game_started") {
+          setErrorMsg("Game has started!");
+        }
+      } catch (err) {
+        console.error("Error parsing message from server:", err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error("WebSocket error:", err);
+      setConnectionStatus("Error");
+      setErrorMsg("Failed to connect to backend server. Running offline.");
+    };
+
+    ws.onclose = () => {
+      setConnectionStatus("Disconnected");
+    };
+
+    socketRef.current = ws;
+  }
+
+  // Count captured pieces compared to typical starting set
+  function scanCapturedPieces(newBoard) {
+    const defaultCounts = {
+      'P': 8, 'R': 2, 'N': 2, 'B': 2, 'Q': 1,
+      'p': 8, 'r': 2, 'n': 2, 'b': 2, 'q': 1
+    };
+    const currentCounts = {
+      'P': 0, 'R': 0, 'N': 0, 'B': 0, 'Q': 0,
+      'p': 0, 'r': 0, 'n': 0, 'b': 0, 'q': 0
+    };
+
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const p = newBoard[r][c];
+        if (p && p !== 'K' && p !== 'k') {
+          currentCounts[p] = (currentCounts[p] || 0) + 1;
+        }
+      }
+    }
+
+    const whiteCap = [];
+    const blackCap = [];
+    // White pieces captured (Black holds them)
+    ['P', 'R', 'N', 'B', 'Q'].forEach(p => {
+      const diff = defaultCounts[p] - currentCounts[p];
+      for (let i = 0; i < diff; i++) whiteCap.push(p);
+    });
+    // Black pieces captured (White holds them)
+    ['p', 'r', 'n', 'b', 'q'].forEach(p => {
+      const diff = defaultCounts[p] - currentCounts[p];
+      for (let i = 0; i < diff; i++) blackCap.push(p);
+    });
+
+    setCapturedWhite(whiteCap);
+    setCapturedBlack(blackCap);
+  }
+
+  function checkTurn(piece) {
+    const isPieceWhite = piece === piece.toUpperCase();
+    if (isPieceWhite && currentTurn !== "White") {
+      setErrorMsg("It is Black's turn!");
+      return false;
+    }
+    if (!isPieceWhite && currentTurn !== "Black") {
+      setErrorMsg("It is White's turn!");
+      return false;
+    }
+    if (playerSide !== "Spectator" && playerSide !== "Both") {
+      if (isPieceWhite && playerSide !== "White") {
+        setErrorMsg("You are playing as Black!");
+        return false;
+      }
+      if (!isPieceWhite && playerSide !== "Black") {
+        setErrorMsg("You are playing as White!");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function sendMoveToServer(fromRow, fromCol, toRow, toCol) {
+    // Record log in history
+    const moveStr = `${files[fromCol]}${ranks[fromRow]} → ${files[toCol]}${ranks[toRow]}`;
+    
+    // Add to localized PGN list
+    setPgnMoves(prev => {
+      const copy = [...prev];
+      if (copy.length === 0 || copy[copy.length - 1].black !== null) {
+        copy.push({ index: copy.length + 1, white: moveStr, black: null });
+      } else {
+        copy[copy.length - 1].black = moveStr;
+      }
+      return copy;
+    });
+
+    // Offline simulation if server is offline
+    if (connectionStatus !== "Connected") {
+      const targetPiece = board[fromRow][fromCol];
+      const updated = board.map(row => [...row]);
+      updated[toRow][toCol] = targetPiece;
+      updated[fromRow][fromCol] = "";
+      setBoard(updated);
+      setCurrentTurn(currentTurn === "White" ? "Black" : "White");
+      scanCapturedPieces(updated);
+      return;
+    }
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(
+        JSON.stringify({ fromRow, fromCol, toRow, toCol })
+      );
+    }
+  }
+
+  // ---------------- DRAG AND DROP ----------------
+  function handleDragStart(piece, row, col) {
+    if (!piece) return;
+    if (!checkTurn(piece)) return;
+
+    setDragPiece({
+      piece,
+      from: { row, col },
+    });
+    setErrorMsg("");
+  }
+
+  function handleDrop(toRow, toCol) {
+    if (!dragPiece) return;
+
+    const { from } = dragPiece;
+    if (from.row === toRow && from.col === toCol) {
+      setDragPiece(null);
+      return;
+    }
+
+    sendMoveToServer(from.row, from.col, toRow, toCol);
+    setDragPiece(null);
+  }
+
+  // ---------------- CLICK TO MOVE ----------------
+  function handleCellClick(row, col) {
+    const piece = board[row][col];
+
+    if (selectedCell) {
+      // If clicking the same cell, deselect it
+      if (selectedCell.row === row && selectedCell.col === col) {
+        setSelectedCell(null);
+        return;
+      }
+
+      // If clicking another piece of the current turn's color, switch selection to it
+      if (piece) {
+        const isPieceWhite = piece === piece.toUpperCase();
+        const isPieceOfCurrentTurn = (isPieceWhite && currentTurn === "White") || (!isPieceWhite && currentTurn === "Black");
+        
+        if (isPieceOfCurrentTurn && checkTurn(piece)) {
+          setSelectedCell({ row, col });
+          setErrorMsg("");
+          return;
+        }
+      }
+
+      // Execute move
+      sendMoveToServer(selectedCell.row, selectedCell.col, row, col);
+      setSelectedCell(null);
+    } else {
+      // First selection click
+      if (piece) {
+        if (!checkTurn(piece)) return;
+        setSelectedCell({ row, col });
+        setErrorMsg("");
+      }
+    }
+  }
+
+  // ---------------- MATCHMAKING QUEUE ----------------
+  function startQueue() {
+    setIsSearching(true);
+    // Simulate finding a match in 3 seconds
+    searchTimerRef.current = setTimeout(() => {
+      setIsSearching(false);
+      setShowMatchOverlay(true);
+    }, 3000);
+  }
+
+  function cancelQueue() {
+    setIsSearching(false);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+  }
+
+  function acceptMatch() {
+    setShowMatchOverlay(false);
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+    
+    // Set parameters
+    setBoard(initialBoard);
+    setWhiteTime(600);
+    setBlackTime(600);
+    setPgnMoves([]);
+    setCapturedWhite([]);
+    setCapturedBlack([]);
+    setScreenState("playing");
+  }
+
+  function declineMatch() {
+    setShowMatchOverlay(false);
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+  }
+
+  function triggerGameOver(winnerSide, reason) {
+    const won = playerSide === winnerSide;
+    setGameResult({
+      won: won,
+      ELO: won ? 15 : -10,
+      rating: won ? 2465 : 2440,
+      reason: won ? "Victory" : "Defeat",
+      opponent: playerSide === "White" ? "Grandmaster_K (2510)" : "You (Elite)"
+    });
+    setScreenState("analysis");
+  }
+
+  function handleSendMessage() {
+    if (!chatMessage.trim()) return;
+    setChatList(prev => [...prev, { sender: "You", text: chatMessage }]);
+    setChatMessage("");
+    
+    // Simple bot response delay
+    setTimeout(() => {
+      setChatList(prev => [...prev, { sender: "Grandmaster_K", text: "Nice move! Let's see how this plays out." }]);
+    }, 2000);
+  }
+
+  // Format seconds to clock MM:SS
+  function formatTime(totalSeconds) {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function renderChessSquare(piece, row, col) {
+    const isDarkCell = (row + col) % 2 === 1;
+    const isPieceWhite = piece && piece === piece.toUpperCase();
+    const isSelected = selectedCell && selectedCell.row === row && selectedCell.col === col;
+
+    return (
+      <div
+        key={`${row}-${col}`}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={() => handleDrop(row, col)}
+        onClick={() => handleCellClick(row, col)}
+        className={`chess-square flex items-center justify-center relative transition-all duration-300 cursor-pointer ${
+          isSelected 
+            ? "bg-primary/40 outline outline-3 outline-primary -outline-offset-3" 
+            : (isDarkCell ? "bg-board-dark" : "bg-board-light")
+        }`}
+      >
+        {piece && (
+          <span
+            draggable
+            onDragStart={() => handleDragStart(piece, row, col)}
+            style={{
+              color: isPieceWhite ? "#f9f9f9" : "#1a1a1a",
+              textShadow: isPieceWhite
+                ? "1px 1px 2px #000, 0 0 1px #000"
+                : "1px 1px 2px #fff, 0 0 1px #fff",
+              cursor: "pointer",
+            }}
+            className="material-symbols-outlined text-4xl lg:text-5xl select-none drop-shadow-lg transition-transform hover:scale-110"
+          >
+            {pieceSymbols[piece] || piece}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  // Layout calculations
+  const isFlipped = playerSide === "Black";
+  const displayRows = isFlipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+  const displayCols = isFlipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+
+  return (
+    <div className="bg-surface text-on-surface font-body-md overflow-x-hidden min-h-screen relative flex flex-col">
+      
+      {/* HEADER SECTION */}
+      <header className="fixed top-0 left-0 w-full z-50 flex justify-between items-center px-gutter h-16 bg-surface-panel backdrop-blur-xl border-b border-white/10 shadow-md">
+        <div className="flex items-center gap-md">
+          <span className="font-headline-lg text-headline-lg font-bold text-primary flex items-center gap-3 cursor-pointer" onClick={() => setScreenState("lobby")}>
+            <span className="material-symbols-outlined text-4xl">chess</span>
+            <span>Grandmaster Elite</span>
+          </span>
+          <nav className="hidden lg:flex items-center gap-lg ml-xl">
+            <button className={`font-label-md text-label-md py-xs transition-colors ${screenState === "playing" ? "text-primary border-b-2 border-primary" : "text-on-surface-variant hover:text-primary"}`} onClick={() => setScreenState("playing")}>Play</button>
+            <button className={`font-label-md text-label-md py-xs transition-colors ${screenState === "analysis" ? "text-primary border-b-2 border-primary" : "text-on-surface-variant hover:text-primary"}`} onClick={() => setScreenState("analysis")}>Analysis</button>
+            <button className={`font-label-md text-label-md py-xs transition-colors ${screenState === "lobby" ? "text-primary border-b-2 border-primary" : "text-on-surface-variant hover:text-primary"}`} onClick={() => setScreenState("lobby")}>Lobby</button>
+          </nav>
+        </div>
+        <div className="flex items-center gap-md">
+          <button className="material-symbols-outlined text-on-surface-variant hover:text-primary transition-colors">notifications</button>
+          <button className="material-symbols-outlined text-on-surface-variant hover:text-primary transition-colors">settings</button>
+          <div className="h-8 w-8 rounded-full overflow-hidden border border-primary/30">
+            <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuC-W6Xa-hggVQEQ8bymYIUKNUTZZyTOWYC8bFuGmQZaj5CfUXuydNIs3HKP6HWVlN0yX0TFaJViX78pnfE9rCBd8hCU929hYwBQQGNutcQ6ZzSMcK6kuHgKSAXmaUc9OeD97ARv2q69akxjJjpJ-fVeMVZPdgZC9tvpYLdudzm0MaPxzx4HzVE0iRtl7LB-tcCSaE6gXjnAwRGakYUBSlAW3EGElGP3Mq42-oRH7LMaIp8AQ7sX9ag0cmk2tSx4WCMyAYe8CK1-ib4" alt="Avatar"/>
+          </div>
+        </div>
+      </header>
+
+      {/* MATCHMAKING / LOBBY SCREEN */}
+      {screenState === "lobby" && (
+        <div className="flex-1 flex flex-col lg:flex-row pt-24 px-gutter pb-8 max-w-7xl mx-auto w-full gap-gutter">
+          {/* Main lobby interface */}
+          <div className="flex-grow lg:w-8/12 space-y-gutter">
+            
+            {/* Matchmaking controls */}
+            <section className="glass-panel rounded-xl p-8 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -mr-20 -mt-20"></div>
+              <h2 className="font-headline-lg text-headline-lg text-white mb-2">Find a Match</h2>
+              <p className="text-on-surface-variant font-body-md mb-8">Select your preferred time control and enter the arena.</p>
+              
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                {[
+                  { id: "10m", title: "10m", type: "Rapid", sub: "+5s inc" },
+                  { id: "15m", title: "15m", type: "Rapid", sub: "+10s inc" },
+                  { id: "30m", title: "30m", type: "Classical", sub: "No inc" },
+                  { id: "60m", title: "60m", type: "Grand", sub: "+30s delay" },
+                ].map((tc) => (
+                  <button
+                    key={tc.id}
+                    onClick={() => setSelectedTimeControl(tc.id)}
+                    className={`time-control-card glass-panel rounded-lg p-4 text-center border-t transition-all hover:scale-[1.02] ${
+                      selectedTimeControl === tc.id 
+                        ? "border-primary/60 bg-primary/10 shadow-lg" 
+                        : "border-white/10 hover:bg-white/5"
+                    }`}
+                  >
+                    <span className={`block font-headline-lg ${selectedTimeControl === tc.id ? "text-primary" : "text-white"}`}>{tc.title}</span>
+                    <span className="text-on-surface-variant font-label-sm">{tc.type}</span>
+                    <span className={`block text-[10px] mt-1 ${selectedTimeControl === tc.id ? "text-primary/60" : "text-on-surface-variant/60"}`}>{tc.sub}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-4">
+                {isSearching ? (
+                  <button onClick={cancelQueue} className="flex-grow bg-surface-container-highest text-primary py-5 rounded-lg font-headline-lg flex items-center justify-center gap-3 transition-transform active:scale-95 group border border-primary/20">
+                    <span className="material-symbols-outlined text-3xl animate-spin">sync</span>
+                    SEARCHING... (Click to Cancel)
+                  </button>
+                ) : (
+                  <button onClick={startQueue} className="flex-grow bg-primary text-on-primary-container py-5 rounded-lg font-headline-lg royal-glow royal-glow-hover flex items-center justify-center gap-3 transition-transform active:scale-95 group">
+                    <span className="material-symbols-outlined text-3xl group-hover:rotate-12 transition-transform">swords</span>
+                    PLAY NOW
+                  </button>
+                )}
+                
+                <div className="flex items-center gap-2">
+                  <select
+                    value={playerSide}
+                    onChange={(e) => {
+                      setPlayerSide(e.target.value);
+                      setSelectedCell(null);
+                    }}
+                    className="bg-surface-container border border-white/10 text-white rounded-lg px-4 py-5 font-title-md outline-none cursor-pointer h-full"
+                  >
+                    <option value="Both">Play Both Sides (Local)</option>
+                    <option value="White">Play as White</option>
+                    <option value="Black">Play as Black</option>
+                    <option value="Spectator">Spectator Only</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            {/* Room custom connector */}
+            <section className="grid grid-cols-1 md:grid-cols-2 gap-gutter">
+              <div className="glass-panel rounded-xl p-6">
+                <h3 class="font-title-md text-white mb-4 flex items-center gap-2">
+                  <span class="material-symbols-outlined text-primary">add_box</span>
+                  Create Room
+                </h3>
+                <p className="text-on-surface-variant font-label-md mb-6">Host a private game with custom rules and invite specific players.</p>
+                <div className="flex gap-2">
+                  <input 
+                    className="bg-surface-container border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-primary flex-grow font-mono"
+                    type="text" 
+                    value={roomID} 
+                    onChange={(e) => setRoomID(e.target.value)} 
+                    placeholder="Room ID"
+                  />
+                  <button onClick={() => setScreenState("playing")} className="bg-surface-container-highest px-4 rounded-lg text-primary hover:bg-white/10 transition-all font-label-md">
+                    Host
+                  </button>
+                </div>
+              </div>
+
+              <div className="glass-panel rounded-xl p-6">
+                <h3 class="font-title-md text-white mb-4 flex items-center gap-2">
+                  <span class="material-symbols-outlined text-primary">key</span>
+                  Join with Code
+                </h3>
+                <div className="flex gap-2">
+                  <input 
+                    className="bg-surface-container border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-primary flex-grow" 
+                    placeholder="Enter Room Code" 
+                    type="text"
+                    value={roomID}
+                    onChange={(e) => setRoomID(e.target.value)}
+                  />
+                  <button onClick={() => setScreenState("playing")} className="bg-surface-container-highest px-4 rounded-lg text-primary hover:bg-white/10 transition-all">
+                    <span className="material-symbols-outlined">arrow_forward</span>
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            {/* Spectator Lobby list */}
+            <section className="glass-panel rounded-xl p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="font-title-md text-white">Live Spectator Lobby</h3>
+                <span className="text-primary font-label-sm flex items-center gap-1 hover:underline cursor-pointer">
+                  View All <span className="material-symbols-outlined text-sm">open_in_new</span>
+                </span>
+              </div>
+              <div className="space-y-3">
+                {[
+                  { opponent: "Kasparov_Fan vs DeepBlue_v2", type: "High Stakes", count: "354 Spectators" },
+                  { opponent: "BlitzKing vs MagnusJr", type: "Rapid", count: "120 Spectators" },
+                ].map((game, i) => (
+                  <div key={i} onClick={() => { setPlayerSide("Spectator"); setScreenState("playing"); }} className="flex items-center justify-between p-4 bg-white/5 rounded-lg hover:bg-white/10 transition-all cursor-pointer">
+                    <div>
+                      <p className="text-white font-label-md">{game.opponent}</p>
+                      <p className="text-[10px] text-on-surface-variant uppercase tracking-wider">{game.type} • {game.count}</p>
+                    </div>
+                    <button className="px-4 py-2 bg-primary/10 text-primary text-xs rounded-full font-bold">WATCH</button>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+          </div>
+
+          {/* Sidebar friends panel */}
+          <div className="lg:w-4/12 flex-grow space-y-gutter">
+            <section className="glass-panel rounded-xl flex flex-col h-full max-h-[700px]">
+              <div className="p-6 border-b border-white/5 flex justify-between items-center">
+                <h3 className="font-title-md text-white">Friends Online</h3>
+                <span className="bg-primary/20 text-primary px-2 py-0.5 rounded text-[10px] font-bold">3 / 48</span>
+              </div>
+              <div className="flex-grow overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                {[
+                  { name: "MasterOfKnights", status: "In Lobby", color: "success" },
+                  { name: "Checkmate_Gal", status: "Playing (15:20 left)", color: "warning" },
+                  { name: "EnPassant_Expert", status: "In Lobby", color: "success" },
+                ].map((friend, i) => (
+                  <div key={i} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-all group cursor-pointer">
+                    <div className="relative">
+                      <div className="w-10 h-10 rounded-full bg-surface-container-highest border border-primary/20 flex items-center justify-center text-primary font-bold">
+                        {friend.name[0]}
+                      </div>
+                      <div className={`absolute bottom-0 right-0 w-3 h-3 border-2 border-surface-elevated rounded-full bg-${friend.color}`}></div>
+                    </div>
+                    <div className="flex-grow">
+                      <p className="text-white font-label-md leading-tight">{friend.name}</p>
+                      <p className={`text-[10px] leading-tight ${friend.color === "success" ? "text-success" : "text-warning"}`}>{friend.status}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="p-4 border-t border-white/5">
+                <button className="w-full flex items-center justify-center gap-2 py-3 text-on-surface-variant font-label-md hover:text-white transition-all">
+                  <span className="material-symbols-outlined">group_add</span>
+                  Invite More Friends
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
+      )}
+
+      {/* MATCH FOUND OVERLAY MODAL */}
+      {showMatchOverlay && (
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="glass-panel w-full max-w-lg rounded-2xl p-10 text-center relative overflow-hidden animate-match-found">
+            <div className="absolute inset-0 bg-primary/5 pointer-events-none"></div>
+            <div className="mb-8">
+              <div className="w-24 h-24 bg-primary rounded-full flex items-center justify-center mx-auto mb-4 royal-glow shadow-[0_0_50px_rgba(240,191,92,0.4)]">
+                <span className="material-symbols-outlined text-5xl text-on-primary">priority_high</span>
+              </div>
+              <h2 className="font-headline-xl text-primary mb-2">MATCH FOUND!</h2>
+              <p className="text-white text-lg">Opponent: <span className="font-bold">Grandmaster_K</span> (2510 ELO)</p>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4 mb-8">
+              <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                <p className="text-[10px] uppercase text-on-surface-variant mb-1">Time Control</p>
+                <p className="text-xl font-bold text-white">10 + 5</p>
+              </div>
+              <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                <p className="text-[10px] uppercase text-on-surface-variant mb-1">Your Color</p>
+                <p className="text-xl font-bold text-white">{playerSide}</p>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <button onClick={acceptMatch} className="w-full py-4 bg-primary text-on-primary-container rounded-lg font-headline-lg royal-glow transition-all active:scale-95">
+                ACCEPT ({matchCountdown}s)
+              </button>
+              <button onClick={declineMatch} className="w-full py-3 text-danger font-label-md hover:bg-danger/10 rounded-lg transition-all">
+                Decline
+              </button>
+            </div>
+
+            <div className="mt-8 flex justify-center gap-1">
+              <div className="h-1 w-full bg-white/10 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-primary transition-all ease-linear" 
+                  style={{ width: `${(matchCountdown / 8) * 100}%`, transitionDuration: "1000ms" }}
+                ></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LIVE GAME SCREEN */}
+      {screenState === "playing" && (
+        <div className="flex-1 flex pt-16 flex-col lg:flex-row overflow-hidden bg-[#0F1115]">
+          
+          {/* Left Sidebar - stats and captured */}
+          <aside className="hidden lg:flex flex-col w-64 border-r border-white/5 p-lg bg-surface-container/30 h-full overflow-y-auto custom-scrollbar">
+            {/* Captured Pieces Panel */}
+            <div className="glass-panel p-md rounded-xl mb-lg">
+              <h3 className="font-label-md text-primary mb-sm uppercase tracking-wider">Captured Pieces</h3>
+              <div className="flex flex-col gap-md">
+                <div className="space-y-sm">
+                  <p className="text-xs text-on-surface-variant">Opponent ({playerSide === "White" ? "Black" : "White"})</p>
+                  <div className="flex flex-wrap gap-xs opacity-80 min-h-[30px]">
+                    {playerSide === "White" ? (
+                      capturedBlack.map((p, idx) => (
+                        <span key={idx} className="material-symbols-outlined text-2xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+                          {p.toLowerCase() === 'p' ? 'chess' : 'star'}
+                        </span>
+                      ))
+                    ) : (
+                      capturedWhite.map((p, idx) => (
+                        <span key={idx} className="material-symbols-outlined text-2xl">
+                          {p.toUpperCase() === 'P' ? 'chess' : 'star'}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <div className="h-px bg-white/10"></div>
+                <div className="space-y-sm">
+                  <p className="text-xs text-on-surface-variant">You ({playerSide})</p>
+                  <div className="flex flex-wrap gap-xs opacity-80 min-h-[30px]">
+                    {playerSide === "White" ? (
+                      capturedWhite.map((p, idx) => (
+                        <span key={idx} className="material-symbols-outlined text-2xl">
+                          {p.toUpperCase() === 'P' ? 'chess' : 'star'}
+                        </span>
+                      ))
+                    ) : (
+                      capturedBlack.map((p, idx) => (
+                        <span key={idx} className="material-symbols-outlined text-2xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+                          {p.toLowerCase() === 'p' ? 'chess' : 'star'}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Game Status Connection Panel */}
+            <div className="glass-panel p-md rounded-xl mb-lg">
+              <h3 className="font-label-md text-primary mb-sm uppercase tracking-wider">Game Status</h3>
+              <div className="space-y-sm">
+                <div className="flex justify-between text-xs">
+                  <span className="text-on-surface-variant">Match Room:</span>
+                  <span className="text-on-surface font-mono">#{roomID}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-on-surface-variant">Connection:</span>
+                  <span className={connectionStatus === "Connected" ? "text-success" : "text-danger"}>{connectionStatus}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-on-surface-variant">Latency:</span>
+                  <span className="text-success">24ms</span>
+                </div>
+              </div>
+            </div>
+
+            {/* User Profile Card */}
+            <div className="mt-auto glass-panel p-md rounded-xl">
+              <div className="flex items-center gap-sm">
+                <div className="w-10 h-10 rounded-full border border-primary/40 overflow-hidden">
+                  <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuC-W6Xa-hggVQEQ8bymYIUKNUTZZyTOWYC8bFuGmQZaj5CfUXuydNIs3HKP6HWVlN0yX0TFaJViX78pnfE9rCBd8hCU929hYwBQQGNutcQ6ZzSMcK6kuHgKSAXmaUc9OeD97ARv2q69akxjJjpJ-fVeMVZPdgZC9tvpYLdudzm0MaPxzx4HzVE0iRtl7LB-tcCSaE6gXjnAwRGakYUBSlAW3EGElGP3Mq42-oRH7LMaIp8AQ7sX9ag0cmk2tSx4WCMyAYe8CK1-ib4" alt="Avatar"/>
+                </div>
+                <div>
+                  <p className="font-label-md text-white">You ({playerSide})</p>
+                  <p className="text-xs text-primary">ELO 2450</p>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          {/* Center Chessboard Panel */}
+          <section className="flex-grow flex flex-col items-center justify-center p-md lg:p-xl relative">
+            
+            {/* Top Opponent profile card */}
+            <div className="w-full max-w-[600px] flex justify-between items-end mb-md">
+              <div className="flex items-center gap-md">
+                <div className="w-12 h-12 rounded-lg border-2 border-white/10 overflow-hidden">
+                  <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBfCtpolD0V08Dg3JpIktweVeBEwm2xyLVNpkkqrEP-JsDhtJYBR91AtMC6piqfmKS93SJtq17okcWqCsJ1uOl0V1FxrTL-0A5DN-nKbF57wIVh3n4UlIpvCBPPceHk-_FR2hCV-ruGAl2Wz0pYoTqFyBa7BqPU2gzWHWJNS5LNUGUSgoT2QYhEIT0QmoRTGsT6MofPY4RlXTrYEwQJQ-iJ1DtjOKFqnr_xASUiXYCm5ilYh9iRYzRozLiyp7-28EVQYGl3wXunU5Y" alt="Opponent Avatar"/>
+                </div>
+                <div>
+                  <h2 className="font-title-md text-white">Grandmaster_K</h2>
+                  <p className="text-xs text-on-surface-variant">ELO 2510 • Russia</p>
+                </div>
+              </div>
+              <div className={`glass-panel px-md py-sm rounded-lg font-mono text-2xl text-on-surface border-l-4 ${currentTurn === (playerSide === "Black" ? "White" : "Black") ? "low-time-glow text-primary" : "border-white/20"}`}>
+                {playerSide === "Black" ? formatTime(whiteTime) : formatTime(blackTime)}
+              </div>
+            </div>
+
+            {/* ERROR DISPLAY */}
+            {errorMsg && (
+              <div className="absolute top-24 w-full max-w-[600px] bg-danger/20 text-danger border border-danger/30 px-4 py-2 rounded-lg text-center z-10 text-sm">
+                {errorMsg}
+              </div>
+            )}
+
+            {/* Chess board rendering */}
+            <div className="relative w-full aspect-square max-w-[600px] border-[8px] border-board-border rounded-sm shadow-2xl overflow-hidden">
+              <div className="grid grid-cols-8 grid-rows-8 h-full w-full">
+                {displayRows.map((r) =>
+                  displayCols.map((c) => renderChessSquare(board[r][c], r, c))
+                )}
+              </div>
+              <div className="absolute bottom-1 right-1 text-[10px] text-board-dark/50 select-none font-bold bg-black/30 px-1 rounded">
+                {playerSide === "Black" ? "Flipped" : "Standard"}
+              </div>
+            </div>
+
+            {/* Bottom player profile card */}
+            <div className="w-full max-w-[600px] flex justify-between items-start mt-md">
+              <div className="flex items-center gap-md">
+                <div className="w-12 h-12 rounded-lg border-2 border-primary overflow-hidden">
+                  <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBjbacYmNVwtBkIVwpwGYfh0eJv5Qo81UvWUv49fwLjXztqcYUFRxeMsq7zGC8MLwKTognE9bwArAfqDPmn_h7_LTyFXpE0tob3-W5QQrPeieEPOMsIJzkI_8DnRdvX0B8CvGf__LXjoGctZ5OerXzC4-cjPcvdNEwocjVs-ZJCneMGIsc1lubx7TouAQC9aSnRExtQqAUnDWvQ2JhyyGU-pDRvQ1HWhZ4gSWkcshEebR5DPx5P3rW93Tw2a8Poe8QkjZgLknGe_Bk" alt="User Avatar"/>
+                </div>
+                <div>
+                  <h2 className="font-title-md text-white">You (Elite)</h2>
+                  <p className="text-xs text-primary">ELO 2450 • Turn: {currentTurn}</p>
+                </div>
+              </div>
+              <div className={`glass-panel px-md py-sm rounded-lg font-mono text-2xl border-l-4 ${currentTurn === (playerSide === "Black" ? "Black" : "White") ? "low-time-glow text-primary border-primary" : "text-on-surface border-white/20"}`}>
+                {playerSide === "Black" ? formatTime(blackTime) : formatTime(whiteTime)}
+              </div>
+            </div>
+
+          </section>
+
+          {/* Right Sidebar - PGN History, Chat & Controls */}
+          <aside className="hidden lg:flex flex-col w-80 border-l border-white/5 bg-surface-container/30 h-full overflow-hidden">
+            {/* Tabs */}
+            <div className="flex border-b border-white/10">
+              <button 
+                onClick={() => setActiveTab("history")} 
+                className={`flex-1 py-md font-label-md transition-all ${activeTab === "history" ? "text-primary border-b-2 border-primary bg-primary/5" : "text-on-surface-variant hover:bg-white/5"}`}
+              >
+                History
+              </button>
+              <button 
+                onClick={() => setActiveTab("chat")} 
+                className={`flex-1 py-md font-label-md transition-all ${activeTab === "chat" ? "text-primary border-b-2 border-primary bg-primary/5" : "text-on-surface-variant hover:bg-white/5"}`}
+              >
+                Chat
+              </button>
+            </div>
+
+            {/* Content tabs */}
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-md">
+              {activeTab === "history" ? (
+                <div className="space-y-xs">
+                  {pgnMoves.map((m) => (
+                    <div key={m.index} className="grid grid-cols-12 gap-sm items-center py-sm px-md rounded-lg bg-white/5">
+                      <span className="col-span-2 text-xs text-on-surface-variant">{m.index}.</span>
+                      <span className="col-span-5 text-sm font-semibold">{m.white}</span>
+                      <span className="col-span-5 text-sm font-semibold">{m.black || "..."}</span>
+                    </div>
+                  ))}
+                  {pgnMoves.length === 0 && (
+                    <div className="py-xl flex flex-col items-center opacity-20 select-none">
+                      <span className="material-symbols-outlined text-4xl">history</span>
+                      <p className="text-xs uppercase tracking-widest mt-sm">No moves recorded</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col h-full justify-between">
+                  <div className="space-y-sm flex-1 overflow-y-auto custom-scrollbar max-h-[300px]">
+                    {chatList.map((chat, idx) => (
+                      <div key={idx} className="p-2 rounded-lg bg-white/5">
+                        <span className="text-xs font-bold text-primary mr-1">{chat.sender}:</span>
+                        <span className="text-sm">{chat.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex gap-2 border-t border-white/10 pt-sm mt-md">
+                    <input 
+                      type="text" 
+                      value={chatMessage} 
+                      onChange={(e) => setChatMessage(e.target.value)}
+                      onKeyDown={(e) => { if(e.key === "Enter") handleSendMessage(); }}
+                      placeholder="Say something..." 
+                      className="bg-surface-container border border-white/10 rounded px-2 py-1 text-white text-sm flex-grow outline-none"
+                    />
+                    <button onClick={handleSendMessage} className="bg-primary text-on-primary-container px-3 py-1 rounded text-xs font-bold">Send</button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Game Controls Panel */}
+            <div className="p-lg grid grid-cols-2 gap-md border-t border-white/10 bg-surface-container-highest">
+              <button onClick={() => triggerGameOver(playerSide === "White" ? "Black" : "White", "Resigned")} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
+                <span className="material-symbols-outlined text-md">flag</span>
+                <span className="text-xs font-label-md">Resign</span>
+              </button>
+              <button onClick={() => triggerGameOver("Draw", "Agreement")} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
+                <span className="material-symbols-outlined text-md">handshake</span>
+                <span className="text-xs font-label-md">Draw</span>
+              </button>
+              <button onClick={() => {
+                // simple offline undo
+                if (board.length > 0) {
+                  // just show undo message
+                  setErrorMsg("Undo request sent to opponent.");
+                }
+              }} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
+                <span className="material-symbols-outlined text-md">undo</span>
+                <span className="text-xs font-label-md">Undo</span>
+              </button>
+              <button onClick={() => setPlayerSide(prev => prev === "White" ? "Black" : "White")} className="flex items-center justify-center gap-sm bg-primary text-on-primary py-md rounded-xl font-bold gold-button-glow transition-all active:scale-95">
+                <span className="material-symbols-outlined text-md font-bold">sync</span>
+                <span className="text-xs font-label-md">Flip</span>
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* MATCH ANALYSIS SCREEN */}
+      {screenState === "analysis" && (
+        <div className="flex-1 flex items-center justify-center p-4 bg-black/60 pt-20">
+          <div className="w-full max-w-3xl glass-panel rounded-2xl overflow-hidden flex flex-col md:flex-row shadow-[0_0_50px_rgba(0,0,0,0.5)]">
+            
+            {/* Left Result Hero card */}
+            <div className="md:w-5/12 bg-gradient-to-br from-primary/20 via-surface-elevated to-surface-elevated p-10 flex flex-col items-center justify-center relative">
+              <div className="absolute inset-0 opacity-10 pointer-events-none">
+                <div className="w-full h-full bg-[radial-gradient(circle_at_center,_var(--tw-gradient-from)_0%,_transparent_70%)] from-primary"></div>
+              </div>
+              <div className="relative mb-6">
+                <div className="absolute -inset-4 bg-primary/20 blur-2xl rounded-full"></div>
+                <span className="material-symbols-outlined text-8xl text-primary gold-glow" style={{ fontVariationSettings: "'FILL' 1" }}>emoji_events</span>
+              </div>
+              <h1 className="font-headline-xl text-headline-xl text-primary uppercase tracking-widest gold-glow mb-2">{gameResult.reason}</h1>
+              <p className="font-body-lg text-body-lg text-on-surface-variant mb-8">vs. {gameResult.opponent}</p>
+              
+              <div className="w-full space-y-6">
+                <div className="flex flex-col items-center">
+                  <span className="text-primary font-headline-lg text-headline-lg font-bold">{gameResult.ELO > 0 ? `+${gameResult.ELO}` : gameResult.ELO} ELO</span>
+                  <span className="text-on-surface-variant text-label-sm font-label-sm uppercase tracking-widest">New Rating: {gameResult.rating}</span>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-label-sm font-label-sm">
+                    <span className="text-on-surface-variant">XP PROGRESS</span>
+                    <span className="text-primary">850 / 1000</span>
+                  </div>
+                  <div className="w-full h-2 bg-surface-container-highest rounded-full overflow-hidden">
+                    <div className="h-full bg-primary rounded-full transition-all duration-1000 ease-out" style={{ width: "85%" }}></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Stats Analysis card */}
+            <div className="md:w-7/12 p-10 bg-surface-elevated/50 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-8">
+                  <h2 className="font-title-md text-title-md text-on-surface border-b border-white/10 pb-2">Match Insights</h2>
+                  <span className="text-label-sm font-label-sm text-primary uppercase bg-primary/10 px-3 py-1 rounded-full">94.2% Accuracy</span>
+                </div>
+
+                {/* Accuracy metrics */}
+                <div className="grid grid-cols-2 gap-4 mb-10">
+                  <div className="glass-panel p-4 rounded-xl flex items-center gap-4 hover:border-primary/40 transition-colors">
+                    <div className="p-2 rounded-lg bg-green-500/20">
+                      <span className="material-symbols-outlined text-green-500" style={{ fontVariationSettings: "'FILL' 1" }}>star</span>
+                    </div>
+                    <div>
+                      <p className="text-label-sm font-label-sm text-on-surface-variant">Brilliant</p>
+                      <p className="font-title-md text-title-md text-on-surface">2</p>
+                    </div>
+                  </div>
+
+                  <div className="glass-panel p-4 rounded-xl flex items-center gap-4 hover:border-primary/40 transition-colors">
+                    <div className="p-2 rounded-lg bg-primary/20">
+                      <span className="material-symbols-outlined text-primary" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+                    </div>
+                    <div>
+                      <p className="text-label-sm font-label-sm text-on-surface-variant">Best Moves</p>
+                      <p className="font-title-md text-title-md text-on-surface">18</p>
+                    </div>
+                  </div>
+
+                  <div className="glass-panel p-4 rounded-xl flex items-center gap-4 hover:border-primary/40 transition-colors">
+                    <div className="p-2 rounded-lg bg-yellow-500/20">
+                      <span className="material-symbols-outlined text-yellow-500" style={{ fontVariationSettings: "'FILL' 1" }}>warning</span>
+                    </div>
+                    <div>
+                      <p className="text-label-sm font-label-sm text-on-surface-variant">Mistakes</p>
+                      <p className="font-title-md text-title-md text-on-surface">1</p>
+                    </div>
+                  </div>
+
+                  <div className="glass-panel p-4 rounded-xl flex items-center gap-4 hover:border-primary/40 transition-colors">
+                    <div className="p-2 rounded-lg bg-red-500/20">
+                      <span className="material-symbols-outlined text-danger" style={{ fontVariationSettings: "'FILL' 1" }}>error</span>
+                    </div>
+                    <div>
+                      <p className="text-label-sm font-label-sm text-on-surface-variant">Blunders</p>
+                      <p className="font-title-md text-title-md text-on-surface">0</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div className="grid grid-cols-2 gap-3">
+                <button onClick={() => setScreenState("lobby")} className="col-span-2 py-4 bg-primary text-on-primary-container font-label-md text-label-md rounded-xl flex items-center justify-center gap-3 button-glow transition-all active:scale-95 shadow-lg shadow-primary/20">
+                  <span className="material-symbols-outlined">replay</span>
+                  Play Again
+                </button>
+                <button onClick={() => { setScreenState("lobby"); startQueue(); }} className="py-3 px-4 border border-primary/40 text-primary font-label-md text-label-md rounded-xl flex items-center justify-center gap-3 hover:bg-primary/10 transition-all active:scale-95">
+                  <span className="material-symbols-outlined">add_box</span>
+                  New Match
+                </button>
+                <button onClick={() => alert("Downloading PGN log...")} className="py-3 px-4 border border-white/10 text-on-surface-variant font-label-md text-label-md rounded-xl flex items-center justify-center gap-3 hover:bg-white/5 transition-all active:scale-95">
+                  <span className="material-symbols-outlined">download</span>
+                  PGN
+                </button>
+                <button onClick={() => setScreenState("lobby")} className="col-span-2 mt-2 py-2 text-on-surface-variant font-label-sm text-label-sm hover:text-primary transition-colors text-center uppercase tracking-widest flex items-center justify-center gap-2">
+                  <span className="material-symbols-outlined text-sm">home</span>
+                  Return Home
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* Bottom Nav Bar (Shared Mobile Component) */}
+      <footer className="fixed bottom-0 left-0 w-full z-50 flex lg:hidden justify-around items-center h-20 pb-safe bg-surface-panel backdrop-blur-xl border-t border-white/10 shadow-2xl">
+        <button onClick={() => setScreenState("playing")} className={`flex flex-col items-center justify-center transition-colors ${screenState === "playing" ? "text-primary scale-110" : "text-on-surface-variant hover:text-primary"}`}>
+          <span className="material-symbols-outlined">chess</span>
+          <span className="font-label-sm text-label-sm">Play</span>
+        </button>
+        <button onClick={() => setScreenState("lobby")} className={`flex flex-col items-center justify-center transition-colors ${screenState === "lobby" ? "text-primary scale-110" : "text-on-surface-variant hover:text-primary"}`}>
+          <span className="material-symbols-outlined">meeting_room</span>
+          <span className="font-label-sm text-label-sm">Lobby</span>
+        </button>
+        <button onClick={() => alert("Social features coming soon!")} className="flex flex-col items-center justify-center text-on-surface-variant hover:text-primary transition-colors">
+          <span className="material-symbols-outlined">diversity_3</span>
+          <span className="font-label-sm text-label-sm">Social</span>
+        </button>
+        <button onClick={() => setScreenState("analysis")} className={`flex flex-col items-center justify-center transition-colors ${screenState === "analysis" ? "text-primary scale-110" : "text-on-surface-variant hover:text-primary"}`}>
+          <span className="material-symbols-outlined">person</span>
+          <span className="font-label-sm text-label-sm">Profile</span>
+        </button>
+      </footer>
+
+    </div>
+  );
+}

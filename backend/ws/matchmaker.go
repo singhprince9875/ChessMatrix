@@ -15,9 +15,7 @@ func (m *Matchmaker) AddPlayer(c *Client) {
 }
 
 func (m *Matchmaker) Start(hub *Hub) {
-
 	for {
-
 		p1 := <-m.Queue
 		p2 := <-m.Queue
 

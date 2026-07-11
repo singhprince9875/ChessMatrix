@@ -1,0 +1,9 @@
+{
+  "name": "chessmatrix-mock-backend",
+  "version": "1.0.0",
+  "description": "Mock WebSocket backend for ChessMatrix",
+  "main": "mock_backend.js",
+  "dependencies": {
+    "ws": "^8.13.0"
+  }
+}
