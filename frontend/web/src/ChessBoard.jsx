@@ -21,6 +21,13 @@ const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
 
 export default function ChessBoard() {
+  // Authentication state
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authMode, setAuthMode] = useState("signin"); // "signin" | "signup"
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+
   // App Navigation state: "lobby" | "playing" | "analysis"
   const [screenState, setScreenState] = useState("lobby");
 
@@ -36,40 +43,57 @@ export default function ChessBoard() {
   
   // Game metrics & history
   const [pgnMoves, setPgnMoves] = useState([]);
-  const [capturedWhite, setCapturedWhite] = useState([]); // pieces captured from White (Black's stash)
-  const [capturedBlack, setCapturedBlack] = useState([]); // pieces captured from Black (White's stash)
-  const [whiteTime, setWhiteTime] = useState(600); // 10 minutes in seconds
+  const [capturedWhite, setCapturedWhite] = useState([]); 
+  const [capturedBlack, setCapturedBlack] = useState([]); 
+  const [whiteTime, setWhiteTime] = useState(600); 
   const [blackTime, setBlackTime] = useState(600);
-  const [gameResult, setGameResult] = useState({ won: true, ELO: 15, rating: 2465, reason: "Victory", opponent: "Grandmaster_K (2510)" });
+  const [roomPlayers, setRoomPlayers] = useState({ white: null, black: null });
+  const [gameResult, setGameResult] = useState({ won: true, ELO: 15, rating: 2450, reason: "Victory", opponent: "Grandmaster_K" });
 
   // Matchmaking lobby states
   const [selectedTimeControl, setSelectedTimeControl] = useState("10m");
   const [isSearching, setIsSearching] = useState(false);
   const [showMatchOverlay, setShowMatchOverlay] = useState(false);
   const [matchCountdown, setMatchCountdown] = useState(8);
-  const [activeTab, setActiveTab] = useState("history"); // "history" | "analysis" | "chat"
+  const [activeTab, setActiveTab] = useState("history"); 
 
   // Chat state
   const [chatMessage, setChatMessage] = useState("");
   const [chatList, setChatList] = useState([
-    { sender: "System", text: "Welcome to Grandmaster Elite Chat!" },
-    { sender: "Grandmaster_K", text: "Good luck, have fun!" }
+    { sender: "System", text: "Welcome to Grandmaster Elite Chat!" }
   ]);
 
   const socketRef = useRef(null);
   const searchTimerRef = useRef(null);
   const countdownIntervalRef = useRef(null);
 
+  // Load user session on mount
+  useEffect(() => {
+    const savedUser = localStorage.getItem("currentUser");
+    if (savedUser) {
+      try {
+        setCurrentUser(JSON.parse(savedUser));
+      } catch (e) {
+        localStorage.removeItem("currentUser");
+      }
+    }
+  }, []);
+
   // Manage WebSockets
   useEffect(() => {
-    connectWebSocket(roomID);
-
+    if (screenState === "playing" && currentUser) {
+      connectWebSocket(roomID);
+    } else {
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
+    }
     return () => {
       if (socketRef.current) {
         socketRef.current.close();
       }
     };
-  }, [roomID]);
+  }, [screenState, roomID, currentUser]);
 
   // Game Clock Timers
   useEffect(() => {
@@ -121,11 +145,13 @@ export default function ChessBoard() {
     };
   }, [showMatchOverlay]);
 
+  // WebSocket Connection
   function connectWebSocket(room) {
     setConnectionStatus("Connecting...");
     setErrorMsg("");
 
-    const wsUrl = `ws://localhost:8080/ws?room=${room}`;
+    const usernameParam = currentUser ? encodeURIComponent(currentUser.username) : "Guest";
+    const wsUrl = `ws://localhost:8080/ws?room=${room}&username=${usernameParam}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
@@ -135,14 +161,21 @@ export default function ChessBoard() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.status === "ok" || data.status === "connected") {
+        if (data.status === "ok" || data.status === "connected" || data.status === "players_updated") {
           setBoard(data.board);
           setCurrentTurn(data.currentTurn);
           setErrorMsg("");
-
-          if (data.status === "ok") {
+          if (data.players) {
+            setRoomPlayers(data.players);
+          }
+          if (data.side) {
+            setPlayerSide(data.side);
+          }
+          if (data.status === "ok" || data.status === "players_updated") {
             scanCapturedPieces(data.board);
           }
+        } else if (data.status === "side_assigned") {
+          setPlayerSide(data.side);
         } else if (data.status === "error") {
           setErrorMsg(data.error || "Invalid move");
           if (data.board) {
@@ -169,6 +202,60 @@ export default function ChessBoard() {
     socketRef.current = ws;
   }
 
+  // Auth Submit Handlers
+  function handleAuthSubmit(e) {
+    e.preventDefault();
+    setAuthError("");
+
+    if (!authUsername.trim() || !authPassword.trim()) {
+      setAuthError("All fields are required.");
+      return;
+    }
+
+    const accounts = JSON.parse(localStorage.getItem("accounts") || "[]");
+
+    if (authMode === "signup") {
+      const exists = accounts.find(acc => acc.username.toLowerCase() === authUsername.toLowerCase());
+      if (exists) {
+        setAuthError("Username already exists.");
+        return;
+      }
+
+      const newUser = {
+        username: authUsername.trim(),
+        password: authPassword,
+        elo: 2400
+      };
+
+      accounts.push(newUser);
+      localStorage.setItem("accounts", JSON.stringify(accounts));
+      localStorage.setItem("currentUser", JSON.stringify(newUser));
+      setCurrentUser(newUser);
+      setAuthUsername("");
+      setAuthPassword("");
+    } else {
+      const user = accounts.find(
+        acc => acc.username.toLowerCase() === authUsername.toLowerCase() && acc.password === authPassword
+      );
+
+      if (!user) {
+        setAuthError("Invalid username or password.");
+        return;
+      }
+
+      localStorage.setItem("currentUser", JSON.stringify(user));
+      setCurrentUser(user);
+      setAuthUsername("");
+      setAuthPassword("");
+    }
+  }
+
+  function handleLogout() {
+    localStorage.removeItem("currentUser");
+    setCurrentUser(null);
+    setScreenState("lobby");
+  }
+
   // Count captured pieces compared to typical starting set
   function scanCapturedPieces(newBoard) {
     const defaultCounts = {
@@ -191,12 +278,10 @@ export default function ChessBoard() {
 
     const whiteCap = [];
     const blackCap = [];
-    // White pieces captured (Black holds them)
     ['P', 'R', 'N', 'B', 'Q'].forEach(p => {
       const diff = defaultCounts[p] - currentCounts[p];
       for (let i = 0; i < diff; i++) whiteCap.push(p);
     });
-    // Black pieces captured (White holds them)
     ['p', 'r', 'n', 'b', 'q'].forEach(p => {
       const diff = defaultCounts[p] - currentCounts[p];
       for (let i = 0; i < diff; i++) blackCap.push(p);
@@ -230,10 +315,9 @@ export default function ChessBoard() {
   }
 
   function sendMoveToServer(fromRow, fromCol, toRow, toCol) {
-    // Record log in history
     const moveStr = `${files[fromCol]}${ranks[fromRow]} → ${files[toCol]}${ranks[toRow]}`;
     
-    // Add to localized PGN list
+    // Add to PGN moves log
     setPgnMoves(prev => {
       const copy = [...prev];
       if (copy.length === 0 || copy[copy.length - 1].black !== null) {
@@ -244,7 +328,7 @@ export default function ChessBoard() {
       return copy;
     });
 
-    // Offline simulation if server is offline
+    // Offline simulation if server offline
     if (connectionStatus !== "Connected") {
       const targetPiece = board[fromRow][fromCol];
       const updated = board.map(row => [...row]);
@@ -267,23 +351,17 @@ export default function ChessBoard() {
   function handleDragStart(piece, row, col) {
     if (!piece) return;
     if (!checkTurn(piece)) return;
-
-    setDragPiece({
-      piece,
-      from: { row, col },
-    });
+    setDragPiece({ piece, from: { row, col } });
     setErrorMsg("");
   }
 
   function handleDrop(toRow, toCol) {
     if (!dragPiece) return;
-
     const { from } = dragPiece;
     if (from.row === toRow && from.col === toCol) {
       setDragPiece(null);
       return;
     }
-
     sendMoveToServer(from.row, from.col, toRow, toCol);
     setDragPiece(null);
   }
@@ -293,13 +371,11 @@ export default function ChessBoard() {
     const piece = board[row][col];
 
     if (selectedCell) {
-      // If clicking the same cell, deselect it
       if (selectedCell.row === row && selectedCell.col === col) {
         setSelectedCell(null);
         return;
       }
-
-      // If clicking another piece of the current turn's color, switch selection to it
+      
       if (piece) {
         const isPieceWhite = piece === piece.toUpperCase();
         const isPieceOfCurrentTurn = (isPieceWhite && currentTurn === "White") || (!isPieceWhite && currentTurn === "Black");
@@ -311,11 +387,9 @@ export default function ChessBoard() {
         }
       }
 
-      // Execute move
       sendMoveToServer(selectedCell.row, selectedCell.col, row, col);
       setSelectedCell(null);
     } else {
-      // First selection click
       if (piece) {
         if (!checkTurn(piece)) return;
         setSelectedCell({ row, col });
@@ -327,7 +401,6 @@ export default function ChessBoard() {
   // ---------------- MATCHMAKING QUEUE ----------------
   function startQueue() {
     setIsSearching(true);
-    // Simulate finding a match in 3 seconds
     searchTimerRef.current = setTimeout(() => {
       setIsSearching(false);
       setShowMatchOverlay(true);
@@ -343,7 +416,6 @@ export default function ChessBoard() {
     setShowMatchOverlay(false);
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     
-    // Set parameters
     setBoard(initialBoard);
     setWhiteTime(600);
     setBlackTime(600);
@@ -360,12 +432,30 @@ export default function ChessBoard() {
 
   function triggerGameOver(winnerSide, reason) {
     const won = playerSide === winnerSide;
+    const eloChange = won ? 15 : -10;
+    
+    // Update ELO rating local storage
+    if (currentUser) {
+      const updatedUser = { ...currentUser, elo: currentUser.elo + eloChange };
+      setCurrentUser(updatedUser);
+      localStorage.setItem("currentUser", JSON.stringify(updatedUser));
+      
+      const accounts = JSON.parse(localStorage.getItem("accounts") || "[]");
+      const index = accounts.findIndex(acc => acc.username.toLowerCase() === currentUser.username.toLowerCase());
+      if (index !== -1) {
+        accounts[index].elo = updatedUser.elo;
+        localStorage.setItem("accounts", JSON.stringify(accounts));
+      }
+    }
+
     setGameResult({
       won: won,
-      ELO: won ? 15 : -10,
-      rating: won ? 2465 : 2440,
+      ELO: eloChange,
+      rating: currentUser ? currentUser.elo + eloChange : 2400,
       reason: won ? "Victory" : "Defeat",
-      opponent: playerSide === "White" ? "Grandmaster_K (2510)" : "You (Elite)"
+      opponent: playerSide === "White" 
+        ? (roomPlayers.black || "Opponent") 
+        : (roomPlayers.white || "Opponent")
     });
     setScreenState("analysis");
   }
@@ -375,13 +465,12 @@ export default function ChessBoard() {
     setChatList(prev => [...prev, { sender: "You", text: chatMessage }]);
     setChatMessage("");
     
-    // Simple bot response delay
     setTimeout(() => {
-      setChatList(prev => [...prev, { sender: "Grandmaster_K", text: "Nice move! Let's see how this plays out." }]);
+      const opponentName = playerSide === "White" ? (roomPlayers.black || "Opponent") : (roomPlayers.white || "Opponent");
+      setChatList(prev => [...prev, { sender: opponentName, text: "Good move! Let's keep playing." }]);
     }, 2000);
   }
 
-  // Format seconds to clock MM:SS
   function formatTime(totalSeconds) {
     const mins = Math.floor(totalSeconds / 60);
     const secs = totalSeconds % 60;
@@ -425,10 +514,79 @@ export default function ChessBoard() {
     );
   }
 
-  // Layout calculations
+  // Reverse mapping calculations
   const isFlipped = playerSide === "Black";
-  const displayRows = isFlipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
-  const displayCols = isFlipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+  const rows = isFlipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+  const cols = isFlipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+
+  // If not logged in, show beautiful auth portal screen
+  if (!currentUser) {
+    return (
+      <div className="bg-surface text-on-surface font-body-md overflow-x-hidden min-h-screen relative flex items-center justify-center p-4">
+        <div className="glass-panel w-full max-w-md rounded-2xl p-8 relative overflow-hidden shadow-[0_0_50px_rgba(0,0,0,0.5)] border border-white/10">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full blur-2xl -mr-10 -mt-10"></div>
+          
+          <div className="text-center mb-8">
+            <span className="material-symbols-outlined text-6xl text-primary mb-2 gold-glow">chess</span>
+            <h1 className="font-headline-lg text-headline-lg text-white">Grandmaster Elite</h1>
+            <p className="text-on-surface-variant text-sm mt-1">Enter the royal arena of chess experts</p>
+          </div>
+
+          <div className="flex border-b border-white/10 mb-6">
+            <button 
+              onClick={() => { setAuthMode("signin"); setAuthError(""); }}
+              className={`flex-1 pb-3 font-label-md text-center transition-all ${authMode === "signin" ? "text-primary border-b-2 border-primary" : "text-on-surface-variant"}`}
+            >
+              Sign In
+            </button>
+            <button 
+              onClick={() => { setAuthMode("signup"); setAuthError(""); }}
+              className={`flex-1 pb-3 font-label-md text-center transition-all ${authMode === "signup" ? "text-primary border-b-2 border-primary" : "text-on-surface-variant"}`}
+            >
+              Sign Up
+            </button>
+          </div>
+
+          {authError && (
+            <div className="bg-danger/10 text-danger border border-danger/20 px-4 py-2 rounded-lg text-sm text-center mb-4">
+              {authError}
+            </div>
+          )}
+
+          <form onSubmit={handleAuthSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-on-surface-variant mb-2">Username</label>
+              <input 
+                type="text" 
+                value={authUsername}
+                onChange={(e) => setAuthUsername(e.target.value)}
+                className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-primary transition-all text-sm"
+                placeholder="e.g. Grandmaster_Chen"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-on-surface-variant mb-2">Password</label>
+              <input 
+                type="password" 
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-primary transition-all text-sm"
+                placeholder="••••••••"
+              />
+            </div>
+
+            <button 
+              type="submit" 
+              className="w-full py-4 bg-primary text-on-primary-container rounded-lg font-headline-lg royal-glow transition-transform active:scale-[0.98] font-bold shadow-lg"
+            >
+              {authMode === "signin" ? "SIGN IN" : "CREATE ACCOUNT"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-surface text-on-surface font-body-md overflow-x-hidden min-h-screen relative flex flex-col">
@@ -447,10 +605,13 @@ export default function ChessBoard() {
           </nav>
         </div>
         <div className="flex items-center gap-md">
+          <span className="text-sm font-label-md text-white mr-2">Hello, {currentUser.username}</span>
           <button className="material-symbols-outlined text-on-surface-variant hover:text-primary transition-colors">notifications</button>
-          <button className="material-symbols-outlined text-on-surface-variant hover:text-primary transition-colors">settings</button>
+          <button onClick={handleLogout} className="material-symbols-outlined text-on-surface-variant hover:text-danger transition-colors cursor-pointer" title="Logout">logout</button>
           <div className="h-8 w-8 rounded-full overflow-hidden border border-primary/30">
-            <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuC-W6Xa-hggVQEQ8bymYIUKNUTZZyTOWYC8bFuGmQZaj5CfUXuydNIs3HKP6HWVlN0yX0TFaJViX78pnfE9rCBd8hCU929hYwBQQGNutcQ6ZzSMcK6kuHgKSAXmaUc9OeD97ARv2q69akxjJjpJ-fVeMVZPdgZC9tvpYLdudzm0MaPxzx4HzVE0iRtl7LB-tcCSaE6gXjnAwRGakYUBSlAW3EGElGP3Mq42-oRH7LMaIp8AQ7sX9ag0cmk2tSx4WCMyAYe8CK1-ib4" alt="Avatar"/>
+            <div className="w-full h-full bg-primary/20 flex items-center justify-center text-primary font-bold text-xs uppercase">
+              {currentUser.username[0]}
+            </div>
           </div>
         </div>
       </header>
@@ -458,10 +619,9 @@ export default function ChessBoard() {
       {/* MATCHMAKING / LOBBY SCREEN */}
       {screenState === "lobby" && (
         <div className="flex-1 flex flex-col lg:flex-row pt-24 px-gutter pb-8 max-w-7xl mx-auto w-full gap-gutter">
-          {/* Main lobby interface */}
           <div className="flex-grow lg:w-8/12 space-y-gutter">
             
-            {/* Matchmaking controls */}
+            {/* Matchmaking selection panel */}
             <section className="glass-panel rounded-xl p-8 relative overflow-hidden">
               <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -mr-20 -mt-20"></div>
               <h2 className="font-headline-lg text-headline-lg text-white mb-2">Find a Match</h2>
@@ -510,7 +670,7 @@ export default function ChessBoard() {
                       setPlayerSide(e.target.value);
                       setSelectedCell(null);
                     }}
-                    className="bg-surface-container border border-white/10 text-white rounded-lg px-4 py-5 font-title-md outline-none cursor-pointer h-full"
+                    className="bg-surface-container border border-white/10 text-white rounded-lg px-4 py-5 font-title-md outline-none cursor-pointer h-full text-sm"
                   >
                     <option value="Both">Play Both Sides (Local)</option>
                     <option value="White">Play as White</option>
@@ -521,11 +681,11 @@ export default function ChessBoard() {
               </div>
             </section>
 
-            {/* Room custom connector */}
+            {/* Room Host custom config */}
             <section className="grid grid-cols-1 md:grid-cols-2 gap-gutter">
               <div className="glass-panel rounded-xl p-6">
-                <h3 class="font-title-md text-white mb-4 flex items-center gap-2">
-                  <span class="material-symbols-outlined text-primary">add_box</span>
+                <h3 className="font-title-md text-white mb-4 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">add_box</span>
                   Create Room
                 </h3>
                 <p className="text-on-surface-variant font-label-md mb-6">Host a private game with custom rules and invite specific players.</p>
@@ -544,8 +704,8 @@ export default function ChessBoard() {
               </div>
 
               <div className="glass-panel rounded-xl p-6">
-                <h3 class="font-title-md text-white mb-4 flex items-center gap-2">
-                  <span class="material-symbols-outlined text-primary">key</span>
+                <h3 className="font-title-md text-white mb-4 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">key</span>
                   Join with Code
                 </h3>
                 <div className="flex gap-2">
@@ -563,7 +723,7 @@ export default function ChessBoard() {
               </div>
             </section>
 
-            {/* Spectator Lobby list */}
+            {/* Watch spectator channels */}
             <section className="glass-panel rounded-xl p-6">
               <div className="flex justify-between items-center mb-6">
                 <h3 className="font-title-md text-white">Live Spectator Lobby</h3>
@@ -589,7 +749,7 @@ export default function ChessBoard() {
 
           </div>
 
-          {/* Sidebar friends panel */}
+          {/* Friends side roster */}
           <div className="lg:w-4/12 flex-grow space-y-gutter">
             <section className="glass-panel rounded-xl flex flex-col h-full max-h-[700px]">
               <div className="p-6 border-b border-white/5 flex justify-between items-center">
@@ -604,7 +764,7 @@ export default function ChessBoard() {
                 ].map((friend, i) => (
                   <div key={i} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-all group cursor-pointer">
                     <div className="relative">
-                      <div className="w-10 h-10 rounded-full bg-surface-container-highest border border-primary/20 flex items-center justify-center text-primary font-bold">
+                      <div className="w-10 h-10 rounded-full bg-surface-container-highest border border-primary/20 flex items-center justify-center text-primary font-bold text-sm uppercase">
                         {friend.name[0]}
                       </div>
                       <div className={`absolute bottom-0 right-0 w-3 h-3 border-2 border-surface-elevated rounded-full bg-${friend.color}`}></div>
@@ -627,7 +787,7 @@ export default function ChessBoard() {
         </div>
       )}
 
-      {/* MATCH FOUND OVERLAY MODAL */}
+      {/* MATCH POP DIALOGUE */}
       {showMatchOverlay && (
         <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="glass-panel w-full max-w-lg rounded-2xl p-10 text-center relative overflow-hidden animate-match-found">
@@ -647,7 +807,7 @@ export default function ChessBoard() {
               </div>
               <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                 <p className="text-[10px] uppercase text-on-surface-variant mb-1">Your Color</p>
-                <p className="text-xl font-bold text-white">{playerSide}</p>
+                <p className="text-xl font-bold text-white">{playerSide === "Both" ? "White/Black" : playerSide}</p>
               </div>
             </div>
 
@@ -676,9 +836,8 @@ export default function ChessBoard() {
       {screenState === "playing" && (
         <div className="flex-1 flex pt-16 flex-col lg:flex-row overflow-hidden bg-[#0F1115]">
           
-          {/* Left Sidebar - stats and captured */}
+          {/* Left stats sidebar */}
           <aside className="hidden lg:flex flex-col w-64 border-r border-white/5 p-lg bg-surface-container/30 h-full overflow-y-auto custom-scrollbar">
-            {/* Captured Pieces Panel */}
             <div className="glass-panel p-md rounded-xl mb-lg">
               <h3 className="font-label-md text-primary mb-sm uppercase tracking-wider">Captured Pieces</h3>
               <div className="flex flex-col gap-md">
@@ -722,7 +881,6 @@ export default function ChessBoard() {
               </div>
             </div>
 
-            {/* Game Status Connection Panel */}
             <div className="glass-panel p-md rounded-xl mb-lg">
               <h3 className="font-label-md text-primary mb-sm uppercase tracking-wider">Game Status</h3>
               <div className="space-y-sm">
@@ -741,40 +899,42 @@ export default function ChessBoard() {
               </div>
             </div>
 
-            {/* User Profile Card */}
             <div className="mt-auto glass-panel p-md rounded-xl">
               <div className="flex items-center gap-sm">
-                <div className="w-10 h-10 rounded-full border border-primary/40 overflow-hidden">
-                  <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuC-W6Xa-hggVQEQ8bymYIUKNUTZZyTOWYC8bFuGmQZaj5CfUXuydNIs3HKP6HWVlN0yX0TFaJViX78pnfE9rCBd8hCU929hYwBQQGNutcQ6ZzSMcK6kuHgKSAXmaUc9OeD97ARv2q69akxjJjpJ-fVeMVZPdgZC9tvpYLdudzm0MaPxzx4HzVE0iRtl7LB-tcCSaE6gXjnAwRGakYUBSlAW3EGElGP3Mq42-oRH7LMaIp8AQ7sX9ag0cmk2tSx4WCMyAYe8CK1-ib4" alt="Avatar"/>
+                <div className="w-10 h-10 rounded-full border border-primary/40 overflow-hidden flex items-center justify-center bg-primary/20 text-primary font-bold">
+                  {currentUser.username[0].toUpperCase()}
                 </div>
                 <div>
-                  <p className="font-label-md text-white">You ({playerSide})</p>
-                  <p className="text-xs text-primary">ELO 2450</p>
+                  <p className="font-label-md text-white">{currentUser.username}</p>
+                  <p className="text-xs text-primary">ELO {currentUser.elo}</p>
                 </div>
               </div>
             </div>
           </aside>
 
-          {/* Center Chessboard Panel */}
+          {/* Center board canvas */}
           <section className="flex-grow flex flex-col items-center justify-center p-md lg:p-xl relative">
             
-            {/* Top Opponent profile card */}
+            {/* Top Opponent details card */}
             <div className="w-full max-w-[600px] flex justify-between items-end mb-md">
               <div className="flex items-center gap-md">
-                <div className="w-12 h-12 rounded-lg border-2 border-white/10 overflow-hidden">
-                  <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBfCtpolD0V08Dg3JpIktweVeBEwm2xyLVNpkkqrEP-JsDhtJYBR91AtMC6piqfmKS93SJtq17okcWqCsJ1uOl0V1FxrTL-0A5DN-nKbF57wIVh3n4UlIpvCBPPceHk-_FR2hCV-ruGAl2Wz0pYoTqFyBa7BqPU2gzWHWJNS5LNUGUSgoT2QYhEIT0QmoRTGsT6MofPY4RlXTrYEwQJQ-iJ1DtjOKFqnr_xASUiXYCm5ilYh9iRYzRozLiyp7-28EVQYGl3wXunU5Y" alt="Opponent Avatar"/>
+                <div className="w-12 h-12 rounded-lg border-2 border-white/10 overflow-hidden bg-surface-container-highest flex items-center justify-center text-white font-bold text-sm uppercase">
+                  {playerSide === "White" 
+                    ? (roomPlayers.black ? roomPlayers.black[0] : "?") 
+                    : (roomPlayers.white ? roomPlayers.white[0] : "?")}
                 </div>
                 <div>
-                  <h2 className="font-title-md text-white">Grandmaster_K</h2>
-                  <p className="text-xs text-on-surface-variant">ELO 2510 • Russia</p>
+                  <h2 className="font-title-md text-white">
+                    {playerSide === "White" ? (roomPlayers.black || "Waiting for player...") : (roomPlayers.white || "Waiting for player...")}
+                  </h2>
+                  <p className="text-xs text-on-surface-variant">ELO 2400 • Opponent</p>
                 </div>
               </div>
-              <div className={`glass-panel px-md py-sm rounded-lg font-mono text-2xl text-on-surface border-l-4 ${currentTurn === (playerSide === "Black" ? "White" : "Black") ? "low-time-glow text-primary" : "border-white/20"}`}>
+              <div className={`glass-panel px-md py-sm rounded-lg font-mono text-2xl text-on-surface border-l-4 ${currentTurn === (playerSide === "Black" ? "White" : "Black") ? "low-time-glow text-primary border-primary" : "border-white/20"}`}>
                 {playerSide === "Black" ? formatTime(whiteTime) : formatTime(blackTime)}
               </div>
             </div>
 
-            {/* ERROR DISPLAY */}
             {errorMsg && (
               <div className="absolute top-24 w-full max-w-[600px] bg-danger/20 text-danger border border-danger/30 px-4 py-2 rounded-lg text-center z-10 text-sm">
                 {errorMsg}
@@ -784,8 +944,8 @@ export default function ChessBoard() {
             {/* Chess board rendering */}
             <div className="relative w-full aspect-square max-w-[600px] border-[8px] border-board-border rounded-sm shadow-2xl overflow-hidden">
               <div className="grid grid-cols-8 grid-rows-8 h-full w-full">
-                {displayRows.map((r) =>
-                  displayCols.map((c) => renderChessSquare(board[r][c], r, c))
+                {rows.map((r) =>
+                  cols.map((c) => renderChessSquare(board[r][c], r, c))
                 )}
               </div>
               <div className="absolute bottom-1 right-1 text-[10px] text-board-dark/50 select-none font-bold bg-black/30 px-1 rounded">
@@ -796,12 +956,16 @@ export default function ChessBoard() {
             {/* Bottom player profile card */}
             <div className="w-full max-w-[600px] flex justify-between items-start mt-md">
               <div className="flex items-center gap-md">
-                <div className="w-12 h-12 rounded-lg border-2 border-primary overflow-hidden">
-                  <img className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBjbacYmNVwtBkIVwpwGYfh0eJv5Qo81UvWUv49fwLjXztqcYUFRxeMsq7zGC8MLwKTognE9bwArAfqDPmn_h7_LTyFXpE0tob3-W5QQrPeieEPOMsIJzkI_8DnRdvX0B8CvGf__LXjoGctZ5OerXzC4-cjPcvdNEwocjVs-ZJCneMGIsc1lubx7TouAQC9aSnRExtQqAUnDWvQ2JhyyGU-pDRvQ1HWhZ4gSWkcshEebR5DPx5P3rW93Tw2a8Poe8QkjZgLknGe_Bk" alt="User Avatar"/>
+                <div className="w-12 h-12 rounded-lg border-2 border-primary overflow-hidden bg-primary/20 text-primary font-bold flex items-center justify-center text-sm uppercase">
+                  {playerSide === "Black" 
+                    ? (roomPlayers.black ? roomPlayers.black[0] : "?") 
+                    : (roomPlayers.white ? roomPlayers.white[0] : "?")}
                 </div>
                 <div>
-                  <h2 className="font-title-md text-white">You (Elite)</h2>
-                  <p className="text-xs text-primary">ELO 2450 • Turn: {currentTurn}</p>
+                  <h2 className="font-title-md text-white">
+                    {playerSide === "Black" ? (roomPlayers.black || currentUser.username) : (roomPlayers.white || currentUser.username)}
+                  </h2>
+                  <p className="text-xs text-primary">ELO {currentUser.elo} • Turn: {currentTurn}</p>
                 </div>
               </div>
               <div className={`glass-panel px-md py-sm rounded-lg font-mono text-2xl border-l-4 ${currentTurn === (playerSide === "Black" ? "Black" : "White") ? "low-time-glow text-primary border-primary" : "text-on-surface border-white/20"}`}>
@@ -811,9 +975,8 @@ export default function ChessBoard() {
 
           </section>
 
-          {/* Right Sidebar - PGN History, Chat & Controls */}
+          {/* Right sidebar - PGN, Chat & Controls */}
           <aside className="hidden lg:flex flex-col w-80 border-l border-white/5 bg-surface-container/30 h-full overflow-hidden">
-            {/* Tabs */}
             <div className="flex border-b border-white/10">
               <button 
                 onClick={() => setActiveTab("history")} 
@@ -829,7 +992,6 @@ export default function ChessBoard() {
               </button>
             </div>
 
-            {/* Content tabs */}
             <div className="flex-1 overflow-y-auto custom-scrollbar p-md">
               {activeTab === "history" ? (
                 <div className="space-y-xs">
@@ -851,7 +1013,7 @@ export default function ChessBoard() {
                 <div className="flex flex-col h-full justify-between">
                   <div className="space-y-sm flex-1 overflow-y-auto custom-scrollbar max-h-[300px]">
                     {chatList.map((chat, idx) => (
-                      <div key={idx} className="p-2 rounded-lg bg-white/5">
+                      <div key={idx} className="p-2 rounded-lg bg-white/5 text-sm">
                         <span className="text-xs font-bold text-primary mr-1">{chat.sender}:</span>
                         <span className="text-sm">{chat.text}</span>
                       </div>
@@ -872,7 +1034,6 @@ export default function ChessBoard() {
               )}
             </div>
 
-            {/* Game Controls Panel */}
             <div className="p-lg grid grid-cols-2 gap-md border-t border-white/10 bg-surface-container-highest">
               <button onClick={() => triggerGameOver(playerSide === "White" ? "Black" : "White", "Resigned")} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
                 <span className="material-symbols-outlined text-md">flag</span>
@@ -883,11 +1044,7 @@ export default function ChessBoard() {
                 <span className="text-xs font-label-md">Draw</span>
               </button>
               <button onClick={() => {
-                // simple offline undo
-                if (board.length > 0) {
-                  // just show undo message
-                  setErrorMsg("Undo request sent to opponent.");
-                }
+                setErrorMsg("Undo request sent to opponent.");
               }} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
                 <span className="material-symbols-outlined text-md">undo</span>
                 <span className="text-xs font-label-md">Undo</span>
@@ -906,7 +1063,6 @@ export default function ChessBoard() {
         <div className="flex-1 flex items-center justify-center p-4 bg-black/60 pt-20">
           <div className="w-full max-w-3xl glass-panel rounded-2xl overflow-hidden flex flex-col md:flex-row shadow-[0_0_50px_rgba(0,0,0,0.5)]">
             
-            {/* Left Result Hero card */}
             <div className="md:w-5/12 bg-gradient-to-br from-primary/20 via-surface-elevated to-surface-elevated p-10 flex flex-col items-center justify-center relative">
               <div className="absolute inset-0 opacity-10 pointer-events-none">
                 <div className="w-full h-full bg-[radial-gradient(circle_at_center,_var(--tw-gradient-from)_0%,_transparent_70%)] from-primary"></div>
@@ -935,7 +1091,6 @@ export default function ChessBoard() {
               </div>
             </div>
 
-            {/* Right Stats Analysis card */}
             <div className="md:w-7/12 p-10 bg-surface-elevated/50 flex flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between mb-8">
@@ -943,7 +1098,6 @@ export default function ChessBoard() {
                   <span className="text-label-sm font-label-sm text-primary uppercase bg-primary/10 px-3 py-1 rounded-full">94.2% Accuracy</span>
                 </div>
 
-                {/* Accuracy metrics */}
                 <div className="grid grid-cols-2 gap-4 mb-10">
                   <div className="glass-panel p-4 rounded-xl flex items-center gap-4 hover:border-primary/40 transition-colors">
                     <div className="p-2 rounded-lg bg-green-500/20">
@@ -987,7 +1141,6 @@ export default function ChessBoard() {
                 </div>
               </div>
 
-              {/* Action buttons */}
               <div className="grid grid-cols-2 gap-3">
                 <button onClick={() => setScreenState("lobby")} className="col-span-2 py-4 bg-primary text-on-primary-container font-label-md text-label-md rounded-xl flex items-center justify-center gap-3 button-glow transition-all active:scale-95 shadow-lg shadow-primary/20">
                   <span className="material-symbols-outlined">replay</span>
@@ -1012,7 +1165,7 @@ export default function ChessBoard() {
         </div>
       )}
 
-      {/* Bottom Nav Bar (Shared Mobile Component) */}
+      {/* Bottom Navigation (Mobile View) */}
       <footer className="fixed bottom-0 left-0 w-full z-50 flex lg:hidden justify-around items-center h-20 pb-safe bg-surface-panel backdrop-blur-xl border-t border-white/10 shadow-2xl">
         <button onClick={() => setScreenState("playing")} className={`flex flex-col items-center justify-center transition-colors ${screenState === "playing" ? "text-primary scale-110" : "text-on-surface-variant hover:text-primary"}`}>
           <span className="material-symbols-outlined">chess</span>
