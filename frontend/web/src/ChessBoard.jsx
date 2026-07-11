@@ -150,8 +150,9 @@ export default function ChessBoard() {
     setConnectionStatus("Connecting...");
     setErrorMsg("");
 
-    const usernameParam = currentUser ? encodeURIComponent(currentUser.username) : "Guest";
-    const wsUrl = `ws://localhost:8080/ws?room=${room}&username=${usernameParam}`;
+    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    const wsBaseUrl = import.meta.env.VITE_WS_URL || (isLocal ? "ws://localhost:8080/ws" : "wss://chessmatrix-backend.onrender.com/ws");
+    const wsUrl = `${wsBaseUrl}?room=${room}&username=${usernameParam}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
