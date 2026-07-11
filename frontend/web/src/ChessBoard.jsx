@@ -1035,6 +1035,22 @@ export default function ChessBoard() {
             </div>
 
             <div className="p-lg grid grid-cols-2 gap-md border-t border-white/10 bg-surface-container-highest">
+              <div className="col-span-2 flex flex-col gap-1 mb-2">
+                <label className="text-[10px] uppercase text-on-surface-variant font-bold">Your Playing Side</label>
+                <select
+                  value={playerSide}
+                  onChange={(e) => {
+                    setPlayerSide(e.target.value);
+                    setSelectedCell(null);
+                  }}
+                  className="w-full bg-surface-container border border-white/10 text-white rounded-lg px-3 py-2 text-sm outline-none cursor-pointer"
+                >
+                  <option value="Both">Play Both Sides (Local)</option>
+                  <option value="White">Play as White</option>
+                  <option value="Black">Play as Black</option>
+                  <option value="Spectator">Spectator Only</option>
+                </select>
+              </div>
               <button onClick={() => triggerGameOver(playerSide === "White" ? "Black" : "White", "Resigned")} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
                 <span className="material-symbols-outlined text-md">flag</span>
                 <span className="text-xs font-label-md">Resign</span>
@@ -1045,13 +1061,9 @@ export default function ChessBoard() {
               </button>
               <button onClick={() => {
                 setErrorMsg("Undo request sent to opponent.");
-              }} className="flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
+              }} className="col-span-2 flex items-center justify-center gap-sm bg-white/5 border border-white/10 py-md rounded-xl hover:bg-white/10 transition-all active:scale-95">
                 <span className="material-symbols-outlined text-md">undo</span>
-                <span className="text-xs font-label-md">Undo</span>
-              </button>
-              <button onClick={() => setPlayerSide(prev => prev === "White" ? "Black" : "White")} className="flex items-center justify-center gap-sm bg-primary text-on-primary py-md rounded-xl font-bold gold-button-glow transition-all active:scale-95">
-                <span className="material-symbols-outlined text-md font-bold">sync</span>
-                <span className="text-xs font-label-md">Flip</span>
+                <span className="text-xs font-label-md">Request Undo</span>
               </button>
             </div>
           </aside>
