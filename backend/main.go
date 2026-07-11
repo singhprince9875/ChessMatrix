@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"chessmatrix/backend/api"
 	"chessmatrix/backend/db"
@@ -21,8 +22,12 @@ func main() {
 		api.ServeWS(hub, w, r)
 	})
 
-	log.Println("ChessMatrix backend server started on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Println("ChessMatrix backend server started on :" + port)
+	if err := http.ListenAndServe(":" + port, nil); err != nil {
 		log.Fatal("ListenAndServe: ", err)
 	}
 }

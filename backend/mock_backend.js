@@ -181,6 +181,7 @@ server.on('upgrade', (request, socket, head) => {
   });
 });
 
-server.listen(8080, () => {
-  console.log('Mock ChessMatrix WebSocket server running on ws://localhost:8080/ws');
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log(`Mock ChessMatrix WebSocket server running on port ${PORT}`);
 });
