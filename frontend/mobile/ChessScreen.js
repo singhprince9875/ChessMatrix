@@ -10,6 +10,8 @@ export default function ChessScreen() {
   const [board, setBoard] = useState([]);
   const [turn, setTurn] = useState("White");
   const [status, setStatus] = useState("Disconnected");
+  const [selectedCell, setSelectedCell] = useState(null);
+  const [error, setError] = useState("");
   const wsRef = useRef(null);
 
   useEffect(() => {
@@ -23,6 +25,16 @@ export default function ChessScreen() {
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.status === "error" && data.error) {
+          setError(data.error);
+          // Auto-clear error after 3 seconds
+          setTimeout(() => {
+            setError("");
+          }, 3000);
+        } else {
+          setError("");
+        }
+
         if (data.board) {
           setBoard(data.board);
         }
@@ -51,6 +63,34 @@ export default function ChessScreen() {
     };
   }, []);
 
+  const handleCellPress = (rIdx, cIdx) => {
+    if (selectedCell) {
+      // Deselect if tapping the same cell
+      if (selectedCell.rIdx === rIdx && selectedCell.cIdx === cIdx) {
+        setSelectedCell(null);
+        return;
+      }
+
+      // Execute move
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        const movePayload = {
+          fromRow: selectedCell.rIdx,
+          fromCol: selectedCell.cIdx,
+          toRow: rIdx,
+          toCol: cIdx
+        };
+        wsRef.current.send(JSON.stringify(movePayload));
+      }
+      setSelectedCell(null);
+    } else {
+      // Select cell if there is a piece on it
+      const piece = board[rIdx]?.[cIdx];
+      if (piece) {
+        setSelectedCell({ rIdx, cIdx });
+      }
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -61,6 +101,12 @@ export default function ChessScreen() {
         </View>
       </View>
 
+      {error ? (
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>⚠️ {error}</Text>
+        </View>
+      ) : null}
+
       <View style={styles.boardContainer}>
         {board.length > 0 ? (
           board.map((row, rIdx) => (
@@ -69,12 +115,16 @@ export default function ChessScreen() {
                 const isDark = (rIdx + cIdx) % 2 === 1;
                 const cellBg = isDark ? "#3b2f2f" : "#d8c0b0";
                 const isPieceWhite = cell && cell === cell.toUpperCase();
+                const isSelected = selectedCell && selectedCell.rIdx === rIdx && selectedCell.cIdx === cIdx;
 
                 return (
-                  <View
+                  <TouchableOpacity
                     key={cIdx}
+                    activeOpacity={0.8}
+                    onPress={() => handleCellPress(rIdx, cIdx)}
                     style={[styles.cell, { backgroundColor: cellBg }]}
                   >
+                    {isSelected ? <View style={styles.selectedHighlight} /> : null}
                     {cell ? (
                       <Text
                         style={[
@@ -85,7 +135,7 @@ export default function ChessScreen() {
                         {pieceSymbols[cell] || cell}
                       </Text>
                     ) : null}
-                  </View>
+                  </TouchableOpacity>
                 );
               })}
             </View>
@@ -124,6 +174,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: "#aaa",
   },
+  errorContainer: {
+    backgroundColor: "#d9534f",
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    marginBottom: 15,
+  },
+  errorText: {
+    color: "#fff",
+    fontWeight: "600",
+    fontSize: 14,
+  },
   boardContainer: {
     borderWidth: 4,
     borderColor: "#2e1d1d",
@@ -138,6 +200,11 @@ const styles = StyleSheet.create({
     height: 40,
     justifyContent: "center",
     alignItems: "center",
+    position: "relative",
+  },
+  selectedHighlight: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(247, 224, 85, 0.4)",
   },
   piece: {
     fontSize: 24,
